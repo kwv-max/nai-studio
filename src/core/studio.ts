@@ -2,7 +2,7 @@
 // nothing here mutates its inputs or touches storage. Persist the returned document yourself.
 import { NaiError } from './errors';
 import { createMockFetcher } from './mock';
-import { contextBudgetChars, genParamsFor, mergeModelList, modelInfo, KNOWN_TEXT_MODELS } from './models';
+import { contextBudgetChars, genParamsFor, imageModelInfo, mergeModelList, modelInfo, KNOWN_TEXT_MODELS } from './models';
 import { NaiClient, type Fetcher } from './nai';
 import {
   chatCompletionPrompt,
@@ -18,10 +18,12 @@ import {
 import { translate } from './translate';
 import type {
   AccountInfo,
+  CharacterPrompt,
   Chat,
   ChatMessage,
   GalleryImage,
   GlossaryEntry,
+  ImagePrompt,
   OutputMode,
   Phase,
   RunOptions,
@@ -46,11 +48,23 @@ export interface EditInput {
 }
 
 export interface ImageInput {
-  /** English tags. Korean input is converted to tags first. */
+  /** Base prompt in English tags. Korean input is converted to tags first. */
   prompt: string;
+  /** Per-character prompts (V4+). */
+  characters?: CharacterPrompt[];
   /** Defaults to Settings.image.negativePrompt. */
   negativePrompt?: string;
   sourceKo?: string;
+}
+
+export interface TagOptions {
+  /** The text is a story passage or chat message rather than a picture description. */
+  fromStory?: boolean;
+  /** Story/chat settings and glossary, so characters keep their usual looks. */
+  reference?: string;
+  signal?: AbortSignal;
+  /** Live preview of the base prompt while it streams. */
+  onText?: (base: string) => void;
 }
 
 export class Studio {
@@ -344,35 +358,39 @@ export class Studio {
   // ------------------------------------------------------------ images
 
   /**
-   * Turns a Korean (or English) description into English Danbooru tags.
-   * Set fromStory when passing a story passage rather than a picture description.
+   * Turns a Korean (or English) description into a NovelAI prompt: scene tags plus per-character prompts,
+   * shaped for the selected image model.
    */
-  async textToTags(text: string, o: { fromStory?: boolean; signal?: AbortSignal; onText?: (t: string) => void } = {}): Promise<string> {
+  async textToTags(text: string, o: TagOptions = {}): Promise<ImagePrompt> {
     const model = this.settings.translatorModel;
-    const params = { ...genParamsFor(this.settings, model), temperature: 0.5, topP: 0.9, topK: 0, minP: 0, maxTokens: 400 };
+    const info = imageModelInfo(this.settings.image.model);
+    const thorough = this.settings.image.thoroughTags;
+    const params = { ...genParamsFor(this.settings, model), temperature: 0.4, topP: 0.9, topK: 0, minP: 0, maxTokens: thorough ? 4096 : 1500 };
     const raw = await this.client.chat({
       model,
-      messages: tagMessages(text, Boolean(o.fromStory)),
+      messages: tagMessages(text, { fromStory: Boolean(o.fromStory), family: info.family, maxCharacters: info.maxCharacters, reference: o.reference }),
       params,
+      thinking: thorough,
       signal: o.signal,
-      onText: (t) => o.onText?.(tidyTags(t)),
+      onText: (t) => o.onText?.(partialBase(t)),
     });
-    const tags = tidyTags(raw);
-    if (!tags) throw new NaiError('태그를 만들지 못했어요. 묘사를 조금 더 구체적으로 적어 주세요.');
-    return tags;
+    const result = parseImagePrompt(raw, info.maxCharacters);
+    if (!result.base && !result.characters.length) throw new NaiError('태그를 만들지 못했어요. 묘사를 조금 더 구체적으로 적어 주세요.');
+    return result;
   }
 
   async generateImage(input: ImageInput, signal?: AbortSignal): Promise<GalleryImage> {
     let prompt = input.prompt.trim();
-    if (!prompt) throw new NaiError('프롬프트를 입력해 주세요.');
+    let characters = (input.characters ?? []).filter((ch) => ch.prompt.trim());
+    if (!prompt && !characters.length) throw new NaiError('프롬프트를 입력해 주세요.');
     let sourceKo = input.sourceKo;
-    if (hasHangul(prompt)) {
+    if (hasHangul(prompt) && !characters.length) {
       sourceKo ??= prompt;
-      prompt = await this.textToTags(prompt, { signal });
+      ({ base: prompt, characters } = await this.textToTags(prompt, { signal }));
     }
     const s = this.settings.image;
     const negativePrompt = input.negativePrompt ?? s.negativePrompt;
-    const r = await this.client.image({ prompt, negativePrompt, settings: s, signal });
+    const r = await this.client.image({ prompt, characters, negativePrompt, settings: s, signal });
     return {
       id: uid(),
       createdAt: Date.now(),
@@ -383,6 +401,7 @@ export class Studio {
       seed: r.seed,
       model: s.model,
       prompt,
+      characters,
       negativePrompt,
       sourceKo,
     };
@@ -540,17 +559,78 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function tidyTags(s: string): string {
-  const line = cleanModelText(s)
-    .split('\n')
-    .map((l) => l.trim())
-    .find((l) => l && !/^(tags?|prompt)\s*:?\s*$/i.test(l));
-  return (line ?? '')
-    .replace(/^(tags?|prompt)\s*:\s*/i, '')
-    .replace(/^["'`]+|["'`]+$/g, '')
-    .replace(/\.\s*$/, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+// Added by the app (quality toggle), so drop them if the model writes them anyway.
+const QUALITY_TAGS = new Set([
+  'masterpiece', 'best quality', 'amazing quality', 'great quality', 'good quality', 'high quality', 'normal quality',
+  'very aesthetic', 'aesthetic', 'top aesthetic', 'absurdres', 'highres', 'no text',
+]);
+const POSITIONS = new Set(['auto', 'left', 'center', 'right', 'top', 'bottom']);
+
+/**
+ * Normalizes a comma-separated tag list: underscores → spaces, lowercase, no quality tags, no duplicates.
+ * Weighted tags (1.2::x::), emoticons (@_@), sentences and a trailing "Text:" block are kept as written.
+ */
+export function cleanTags(s: string): string {
+  let text = s.replace(/\s+/g, ' ').trim().replace(/^["'`]+|["'`]+$/g, '');
+  let textBlock = '';
+  const t = text.search(/\btext\s*:/i);
+  if (t >= 0) {
+    textBlock = text.slice(t).trim();
+    text = text.slice(0, t);
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const piece of text.split(',')) {
+    let tag = piece.trim();
+    if (!tag) continue;
+    const plain = /^[\w\s()'#:.-]+$/.test(tag) && /[a-z]/i.test(tag) && !tag.includes('::') && tag.split(' ').length <= 5;
+    if (plain) tag = tag.replace(/\.$/, '').replace(/_/g, ' ').toLowerCase();
+    const key = tag.toLowerCase();
+    if (QUALITY_TAGS.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    out.push(tag);
+  }
+  return [out.join(', '), textBlock].filter(Boolean).join(', ');
+}
+
+/** Reads the model's JSON reply. Falls back to treating the reply as a single tag line. */
+export function parseImagePrompt(raw: string, maxCharacters: number): ImagePrompt {
+  const text = cleanModelText(raw).trim();
+  let data: any = null;
+  const a = text.indexOf('{');
+  const b = text.lastIndexOf('}');
+  if (a >= 0 && b > a) {
+    try {
+      data = JSON.parse(text.slice(a, b + 1));
+    } catch {
+      data = null;
+    }
+  }
+  if (!data || typeof data !== 'object') {
+    const line = text.split('\n').map((l) => l.trim()).find((l) => l && !/^(tags?|prompt)\s*:?\s*$/i.test(l)) ?? '';
+    return { base: cleanTags(line.replace(/^(tags?|prompt)\s*:\s*/i, '')), characters: [] };
+  }
+
+  let base = cleanTags(String(data.base ?? data.prompt ?? ''));
+  let characters: CharacterPrompt[] = (Array.isArray(data.characters) ? data.characters : [])
+    .map((ch: any) => ({
+      name: String(ch?.name ?? '').trim(),
+      prompt: cleanTags(String(ch?.prompt ?? '')),
+      position: POSITIONS.has(String(ch?.position)) ? String(ch.position) : 'auto',
+    }))
+    .filter((ch: CharacterPrompt) => ch.prompt);
+
+  // Models without character prompts (or more people than allowed): fold the rest into base.
+  const overflow = characters.slice(maxCharacters);
+  characters = characters.slice(0, maxCharacters);
+  if (overflow.length) base = cleanTags([base, ...overflow.map((ch) => ch.prompt)].join(', '));
+  return { base, characters };
+}
+
+/** The "base" value of a JSON reply that is still streaming, for a live preview. */
+function partialBase(raw: string): string {
+  const m = cleanModelText(raw).match(/"base"\s*:\s*"((?:[^"\\]|\\.)*)/);
+  return m ? m[1].replace(/\\"/g, '"').replace(/\\n/g, ' ') : '';
 }
 
 function parseJsonArray(s: string): any[] {

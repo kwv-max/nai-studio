@@ -1,5 +1,5 @@
 import { useState, type KeyboardEvent, type ReactNode } from 'react';
-import { isAbortError, type GlossaryEntry, type Progress } from '../core';
+import { isAbortError, type Chat, type GlossaryEntry, type Progress, type Story } from '../core';
 
 export function ActionSheet({ isOpen, onClose, children }: { isOpen: boolean; onClose: () => void; children: ReactNode }) {
   if (!isOpen) return null;
@@ -134,4 +134,17 @@ export function GlossaryEditor({
       </div>
     </div>
   );
+}
+
+/** Story/chat settings as reference notes for the image tag converter (character looks, setting). */
+export function imageReference(doc: Story | Chat): string {
+  const lines: string[] = [];
+  if ('charName' in doc) {
+    if (doc.charName) lines.push(`Main character: ${doc.charName}`);
+    if (doc.userName) lines.push(`The user plays: ${doc.userName}`);
+  }
+  if (doc.systemPrompt.trim()) lines.push(doc.systemPrompt.trim());
+  const names = doc.glossary.filter((g) => g.en.trim() && g.ko.trim()).map((g) => `${g.ko} = ${g.en}${g.note ? ` (${g.note})` : ''}`);
+  if (names.length) lines.push(`Names: ${names.join('; ')}`);
+  return lines.join('\n');
 }

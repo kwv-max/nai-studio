@@ -1,7 +1,7 @@
 import { errorFromResponse, NaiError } from './errors';
-import { completionPrefix, completionPreset, IMAGE_API, imageModelInfo, TEXT_API, TIER_NAMES } from './models';
+import { completionPrefix, completionPreset, IMAGE_API, imageModelInfo, positionToCenter, TEXT_API, TIER_NAMES } from './models';
 import { readSse } from './sse';
-import type { AccountInfo, GenParams, ImageSettings } from './types';
+import type { AccountInfo, CharacterPrompt, GenParams, ImageSettings } from './types';
 import { base64ToBytes, sniffImageMime, stripThinking } from './util';
 import { unzip } from './zip';
 
@@ -37,7 +37,10 @@ export interface CompletionRequest {
 }
 
 export interface ImageRequest {
+  /** Base prompt (scene). Quality tags are appended here when enabled. */
   prompt: string;
+  /** Per-character prompts. Merged into the base prompt for models without character prompts. */
+  characters?: CharacterPrompt[];
   negativePrompt: string;
   settings: ImageSettings;
   signal?: AbortSignal;
@@ -219,10 +222,20 @@ export class NaiClient {
     const s = req.settings;
     const info = imageModelInfo(s.model);
     const seed = s.seed >= 0 ? s.seed : Math.floor(Math.random() * 4294967295);
-    const prompt = s.qualityTags && info.qualityTags ? `${req.prompt.trim().replace(/,\s*$/, '')}, ${info.qualityTags}` : req.prompt;
+
+    const allChars = (req.characters ?? []).filter((ch) => ch.prompt.trim());
+    const chars = allChars.slice(0, info.maxCharacters);
+    let base = joinTags([req.prompt, ...allChars.slice(info.maxCharacters).map((ch) => ch.prompt)]);
+    const transparent = s.transparent && info.transparency;
+    if (transparent && !/transparent background/i.test(base)) base = joinTags([base, 'transparent background']);
+    const prompt = s.qualityTags && info.qualityTags ? joinTags([base, info.qualityTags]) : base;
+
+    // Positions apply only if the user placed at least one character; otherwise the model chooses.
+    const useCoords = chars.some((ch) => ch.position && ch.position !== 'auto');
+    const centers = chars.map((ch) => positionToCenter(useCoords ? ch.position : 'auto'));
 
     const parameters: Record<string, unknown> = {
-      params_version: 3,
+      params_version: 4,
       width: s.width,
       height: s.height,
       scale: s.scale,
@@ -236,19 +249,31 @@ export class NaiClient {
       legacy: false,
       add_original_image: true,
       cfg_rescale: s.cfgRescale,
-      noise_schedule: s.noiseSchedule,
+      // NovelAI's client always uses karras on V5.
+      noise_schedule: info.family === 'v5' ? 'karras' : s.noiseSchedule,
       legacy_v3_extend: false,
       seed,
       negative_prompt: req.negativePrompt,
       deliberate_euler_ancestral_bug: false,
       prefer_brownian: true,
     };
-    if (info.v4) {
-      parameters.v4_prompt = { caption: { base_caption: prompt, char_captions: [] }, use_coords: false, use_order: true };
-      parameters.v4_negative_prompt = { caption: { base_caption: req.negativePrompt, char_captions: [] }, legacy_uc: false };
-    } else {
+    if (info.family === 'v3') {
       parameters.sm = false;
       parameters.sm_dyn = false;
+    } else {
+      parameters.use_coords = useCoords;
+      parameters.legacy_uc = false;
+      parameters.v4_prompt = {
+        caption: { base_caption: prompt, char_captions: chars.map((ch, i) => ({ char_caption: ch.prompt.trim(), centers: [centers[i]] })) },
+        use_coords: useCoords,
+        use_order: true,
+      };
+      parameters.v4_negative_prompt = {
+        caption: { base_caption: req.negativePrompt, char_captions: chars.map((_, i) => ({ char_caption: '', centers: [centers[i]] })) },
+        legacy_uc: false,
+      };
+      parameters.characterPrompts = chars.map((ch, i) => ({ prompt: ch.prompt.trim(), uc: '', center: centers[i], enabled: true }));
+      if (transparent) parameters.tag_hint_transparent_background = true;
     }
 
     const res = await this.send(`${IMAGE_API}/ai/generate-image`, {
@@ -272,6 +297,11 @@ export class NaiClient {
     if (!img) throw new NaiError('이미지가 응답에 없어요.');
     return { bytes: img.data, mime: sniffImageMime(img.data), seed };
   }
+}
+
+/** Joins comma-separated tag lists, dropping empty pieces and stray commas. */
+function joinTags(parts: string[]): string {
+  return parts.map((p) => p.trim().replace(/^,+|,+$/g, '').trim()).filter(Boolean).join(', ');
 }
 
 function firstStop(text: string, stops: string[]): number {

@@ -15,11 +15,23 @@ interface AppContextType {
   setBusy: (b: boolean) => void;
   showToast: (msg: string) => void;
   navigate: (tab: Tab) => void;
-  imageDraftText: string;
-  setImageDraftText: (t: string) => void;
+  /** Set by "이 장면 그리기" in the novel/chat tabs; the image tab picks it up. */
+  imageDraft: ImageDraft | null;
+  setImageDraft: (d: ImageDraft | null) => void;
   /** Bumped when stored data changes outside a view (e.g. backup import), so lists reload. */
   dataVersion: number;
   bumpData: () => void;
+}
+
+export interface ImageDraft {
+  /** Passage or message to draw (English original when there is one: converts more accurately). */
+  text: string;
+  /** What the description box shows (Korean when there is one). */
+  display: string;
+  /** Story/chat settings and glossary, for consistent character looks. */
+  reference: string;
+  /** Where it came from, shown to the user (e.g. the story title). */
+  source: string;
 }
 
 export type Tab = 'novel' | 'chat' | 'image' | 'settings';
@@ -44,7 +56,7 @@ export function App() {
   const [isBusy, setBusy] = useState(false);
   const [activeTab, setActiveTab] = useState<Tab>(() => (settings.apiKey || settings.mock ? 'novel' : 'settings'));
   const [toasts, setToasts] = useState<{ id: number; msg: string }[]>([]);
-  const [imageDraftText, setImageDraftText] = useState('');
+  const [imageDraft, setImageDraft] = useState<ImageDraft | null>(null);
   const [dataVersion, setDataVersion] = useState(0);
   const toastSeq = useRef(0);
 
@@ -72,8 +84,8 @@ export function App() {
     setBusy,
     showToast,
     navigate: setActiveTab,
-    imageDraftText,
-    setImageDraftText,
+    imageDraft,
+    setImageDraft,
     dataVersion,
     bumpData: () => setDataVersion((v) => v + 1),
   };

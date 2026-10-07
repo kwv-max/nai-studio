@@ -1,10 +1,28 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppContext } from './App';
-import { db, IMAGE_MODELS, IMAGE_SIZES, IMAGE_SAMPLERS, imageModelInfo, isFreeForOpus, isAbortError, type GalleryImage, type ImageSettings } from '../core';
-import { ChevronLeft, ChevronDown, ChevronUp, Download, Share2, Trash2, RefreshCcw } from 'lucide-react';
+import {
+  db,
+  CHARACTER_POSITIONS,
+  IMAGE_MODELS,
+  IMAGE_SIZES,
+  IMAGE_SAMPLERS,
+  imageCost,
+  imageModelInfo,
+  isAbortError,
+  type CharacterPrompt,
+  type GalleryImage,
+  type ImageSettings,
+} from '../core';
+import { newId } from './Shared';
+import { ChevronLeft, ChevronDown, ChevronUp, Download, Share2, Trash2, RefreshCcw, Plus, X } from 'lucide-react';
 
 const EXT: Record<string, string> = { 'image/png': 'png', 'image/webp': 'webp', 'image/jpeg': 'jpg', 'image/svg+xml': 'svg' };
 const fileName = (img: GalleryImage) => `nai-${img.seed}.${EXT[img.mime] ?? 'png'}`;
+
+/** Character card in the editor; `key` keeps React rows stable while editing. */
+type CharacterRow = CharacterPrompt & { key: string };
+const toRows = (list: CharacterPrompt[] = []): CharacterRow[] => list.map((c) => ({ ...c, key: newId() }));
+const fromRows = (rows: CharacterRow[]): CharacterPrompt[] => rows.map(({ key: _key, ...c }) => c);
 
 /** Object URL tied to the component's lifetime. */
 function useBlobUrl(blob: Blob | null | undefined): string | null {
@@ -31,9 +49,11 @@ function Thumb({ img, onClick }: { img: GalleryImage; onClick: () => void }) {
 }
 
 export function ImageView() {
-  const { settings, updateSettings, studio, showToast, isBusy, setBusy, imageDraftText, setImageDraftText, dataVersion } = useAppContext();
+  const { settings, updateSettings, studio, showToast, isBusy, setBusy, imageDraft, setImageDraft, dataVersion } = useAppContext();
   const [description, setDescription] = useState('');
-  const [tags, setTags] = useState('');
+  const [reference, setReference] = useState<{ text: string; source: string } | null>(null);
+  const [base, setBase] = useState('');
+  const [characters, setCharacters] = useState<CharacterRow[]>([]);
   const [task, setTask] = useState<'tags' | 'image' | null>(null);
   const [showOptions, setShowOptions] = useState(false);
 
@@ -42,6 +62,9 @@ export function ImageView() {
   const activeUrl = useBlobUrl(activeImage?.blob);
 
   const abortCtrlRef = useRef<AbortController | null>(null);
+  const info = imageModelInfo(settings.image.model);
+  const cost = imageCost(settings);
+  const canAddCharacter = info.maxCharacters > 0 && characters.length < info.maxCharacters;
 
   const loadImages = async () => {
     try {
@@ -73,13 +96,16 @@ export function ImageView() {
     abortCtrlRef.current = null;
   };
 
-  const convertToTags = async (text: string, fromStory: boolean) => {
+  const convertToTags = async (text: string, fromStory: boolean, ref?: string) => {
     if (!text.trim()) return;
     const ctrl = begin('tags');
     if (!ctrl) return;
-    setTags('');
+    setBase('');
+    setCharacters([]);
     try {
-      setTags(await studio.textToTags(text, { fromStory, signal: ctrl.signal, onText: setTags }));
+      const result = await studio.textToTags(text, { fromStory, reference: ref, signal: ctrl.signal, onText: setBase });
+      setBase(result.base);
+      setCharacters(toRows(result.characters));
     } catch (e: any) {
       if (!isAbortError(e)) showToast(e.message);
     } finally {
@@ -89,20 +115,25 @@ export function ImageView() {
 
   // "이 장면 그리기" from the novel or chat tab.
   useEffect(() => {
-    if (!imageDraftText) return;
-    const text = imageDraftText;
-    setImageDraftText('');
+    if (!imageDraft) return;
+    const draft = imageDraft;
+    setImageDraft(null);
     setActiveImage(null);
-    setDescription('');
-    convertToTags(text, true);
-  }, [imageDraftText]);
+    setDescription(draft.display.trim());
+    const ref = draft.reference.trim() ? { text: draft.reference, source: draft.source } : null;
+    setReference(ref);
+    convertToTags(draft.text, true, ref?.text);
+  }, [imageDraft]);
 
   const handleGenerate = async () => {
-    if (!tags.trim()) return;
+    if (!base.trim() && !characters.some((c) => c.prompt.trim())) return;
     const ctrl = begin('image');
     if (!ctrl) return;
     try {
-      const img = await studio.generateImage({ prompt: tags, sourceKo: description.trim() || undefined }, ctrl.signal);
+      const img = await studio.generateImage(
+        { prompt: base, characters: fromRows(characters), sourceKo: description.trim() || undefined },
+        ctrl.signal,
+      );
       await db.saveImage(img);
       setImages((prev) => [img, ...prev]);
       setActiveImage(img);
@@ -144,6 +175,22 @@ export function ImageView() {
 
   const setImage = (patch: Partial<ImageSettings>) => updateSettings({ image: { ...settings.image, ...patch } });
 
+  /** Switching models also moves scale/steps/negative prompt to the new model's defaults, unless the user changed them. */
+  const changeModel = (id: string) => {
+    const next = imageModelInfo(id);
+    const prev = info;
+    const s = settings.image;
+    setImage({
+      model: id,
+      ...(s.negativePrompt === prev.defaultNegative ? { negativePrompt: next.defaultNegative } : {}),
+      ...(s.scale === prev.defaults.scale ? { scale: next.defaults.scale } : {}),
+      ...(s.steps === prev.defaults.steps ? { steps: next.defaults.steps } : {}),
+    });
+  };
+
+  const updateCharacter = (key: string, patch: Partial<CharacterPrompt>) =>
+    setCharacters((rows) => rows.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+
   if (activeImage) {
     return (
       <div className="screen viewer">
@@ -161,10 +208,14 @@ export function ImageView() {
           <p className="muted">시드 {activeImage.seed} · {imageModelInfo(activeImage.model).label} · {activeImage.width}×{activeImage.height}</p>
           {activeImage.sourceKo && <p className="viewer-ko">{activeImage.sourceKo}</p>}
           <p className="viewer-prompt">{activeImage.prompt}</p>
+          {activeImage.characters?.map((c, i) => (
+            <p key={i} className="viewer-prompt"><span className="viewer-ko">{c.name || `캐릭터 ${i + 1}`}</span> · {c.prompt}</p>
+          ))}
           <button
             className="btn secondary"
             onClick={() => {
-              setTags(activeImage.prompt);
+              setBase(activeImage.prompt);
+              setCharacters(toRows(activeImage.characters));
               setDescription(activeImage.sourceKo ?? '');
               setImage({ seed: activeImage.seed });
               setActiveImage(null);
@@ -179,14 +230,14 @@ export function ImageView() {
     );
   }
 
-  const free = isFreeForOpus(settings);
-
   return (
     <div className="screen">
       <div className="header">
-        <div style={{ width: '44px' }} />
+        <div className="header-side" />
         <h1>이미지</h1>
-        <span className={`cost-badge ${free ? 'free' : 'paid'}`}>{free ? 'Opus 무료' : 'Anlas 소모'}</span>
+        <div className="header-side" style={{ justifyContent: 'flex-end' }}>
+          <span className={`cost-badge ${cost.free ? 'free' : 'paid'}`}>{cost.label}</span>
+        </div>
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto' }}>
@@ -197,13 +248,19 @@ export function ImageView() {
               className="form-control"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="예: 비 오는 밤, 등대 창가에 선 은발 소녀"
+              placeholder="예: 해질녘 교실, 창가에 앉은 단발 소녀에게 남학생이 우산을 건넨다"
               style={{ minHeight: '72px' }}
             />
+            {reference && (
+              <div className="ref-chip">
+                <span>‘{reference.source}’ 설정의 인물 외형을 참고해요</span>
+                <button onClick={() => setReference(null)} aria-label="참고 끄기"><X size={14} /></button>
+              </div>
+            )}
             <button
               className="btn secondary"
               style={{ marginTop: '8px' }}
-              onClick={() => (task === 'tags' ? abortCtrlRef.current?.abort() : convertToTags(description, false))}
+              onClick={() => (task === 'tags' ? abortCtrlRef.current?.abort() : convertToTags(description, Boolean(reference), reference?.text))}
               disabled={task === 'image' || (task !== 'tags' && (isBusy || !description.trim()))}
             >
               {task === 'tags' ? '변환 중… (눌러서 중지)' : '태그로 변환 ↓'}
@@ -211,25 +268,73 @@ export function ImageView() {
           </div>
 
           <div className="form-group">
-            <label>태그 (영어) — 직접 입력해도 돼요</label>
+            <label>장면·구도 (기본 프롬프트)</label>
             <textarea
-              className="form-control"
-              value={tags}
-              onChange={(e) => setTags(e.target.value)}
-              placeholder="1girl, silver hair, lighthouse, rain, night"
-              style={{ minHeight: '88px' }}
+              className="form-control mono"
+              value={base}
+              onChange={(e) => setBase(e.target.value)}
+              placeholder="1girl, 1boy, classroom, sunset, window, cowboy shot"
+              style={{ minHeight: '96px' }}
             />
           </div>
+
+          {(characters.length > 0 || info.maxCharacters > 0) && (
+            <div className="form-group">
+              <label>
+                캐릭터 <span className="muted">· 인물마다 따로 적으면 특징이 섞이지 않아요</span>
+              </label>
+              {characters.map((c, i) => (
+                <div key={c.key} className="char-card">
+                  <div className="char-card-head">
+                    <input
+                      className="char-name"
+                      value={c.name}
+                      placeholder={`캐릭터 ${i + 1}`}
+                      onChange={(e) => updateCharacter(c.key, { name: e.target.value })}
+                      aria-label="캐릭터 이름 (메모용)"
+                    />
+                    <select className="char-pos" value={c.position} onChange={(e) => updateCharacter(c.key, { position: e.target.value })} aria-label="위치">
+                      {CHARACTER_POSITIONS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                    </select>
+                    <button className="char-del" onClick={() => setCharacters((rows) => rows.filter((r) => r.key !== c.key))} aria-label="캐릭터 삭제"><X size={18} /></button>
+                  </div>
+                  <textarea
+                    className="form-control mono"
+                    value={c.prompt}
+                    onChange={(e) => updateCharacter(c.key, { prompt: e.target.value })}
+                    placeholder="girl, short hair, black hair, school uniform, smile, source#hug"
+                    style={{ minHeight: '64px' }}
+                  />
+                </div>
+              ))}
+              {info.maxCharacters === 0 ? (
+                characters.length > 0 && <p className="hint warn">{info.label}은(는) 캐릭터 프롬프트가 없어서 기본 프롬프트에 합쳐 보내요.</p>
+              ) : (
+                <button
+                  className="btn ghost add-char"
+                  onClick={() => setCharacters((rows) => [...rows, { key: newId(), name: '', prompt: '', position: 'auto' }])}
+                  disabled={!canAddCharacter}
+                >
+                  <Plus size={16} /> 캐릭터 추가
+                </button>
+              )}
+              <p className="hint">
+                두 명 이상일 때 써요. 상호작용은 하는 쪽에 <code>source#hug</code>, 받는 쪽에 <code>target#hug</code>, 서로 하면 둘 다 <code>mutual#holding hands</code>.
+              </p>
+            </div>
+          )}
 
           {task === 'image' ? (
             <button className="btn danger" onClick={() => abortCtrlRef.current?.abort()}>생성 중… (눌러서 중지)</button>
           ) : (
-            <button className="btn" onClick={handleGenerate} disabled={isBusy || !tags.trim()}>이미지 생성</button>
+            <button className="btn" onClick={handleGenerate} disabled={isBusy || (!base.trim() && !characters.some((c) => c.prompt.trim()))}>
+              이미지 생성
+            </button>
           )}
 
           <div className="options">
             <button className="options-toggle" onClick={() => setShowOptions(!showOptions)}>
-              <span>옵션 <span className="muted">· {imageModelInfo(settings.image.model).label} · {settings.image.width}×{settings.image.height}</span></span>
+              <span>옵션 <span className="muted">· {info.label} · {settings.image.width}×{settings.image.height}</span></span>
               {showOptions ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
             </button>
 
@@ -237,18 +342,12 @@ export function ImageView() {
               <div className="options-body">
                 <div>
                   <label>모델</label>
-                  <select
-                    className="form-control"
-                    value={settings.image.model}
-                    onChange={(e) => {
-                      const info = imageModelInfo(e.target.value);
-                      const prevDefault = imageModelInfo(settings.image.model).defaultNegative;
-                      // Swap the negative prompt too, unless the user customised it.
-                      setImage({ model: e.target.value, ...(settings.image.negativePrompt === prevDefault ? { negativePrompt: info.defaultNegative } : {}) });
-                    }}
-                  >
+                  <select className="form-control" value={settings.image.model} onChange={(e) => changeModel(e.target.value)}>
                     {IMAGE_MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
                   </select>
+                  {info.family === 'v5' && (
+                    <p className="hint">V5는 Opus도 무제한이 아니라 천천히 충전되는 한도를 써요. 한도를 넘으면 Anlas가 들어요.</p>
+                  )}
                 </div>
 
                 <div>
@@ -293,12 +392,25 @@ export function ImageView() {
 
                 <div>
                   <label>네거티브 프롬프트</label>
-                  <textarea className="form-control" value={settings.image.negativePrompt} onChange={(e) => setImage({ negativePrompt: e.target.value })} style={{ minHeight: '72px' }} />
+                  <textarea className="form-control mono" value={settings.image.negativePrompt} onChange={(e) => setImage({ negativePrompt: e.target.value })} style={{ minHeight: '72px' }} />
+                  {settings.image.negativePrompt !== info.defaultNegative && (
+                    <button className="btn ghost" onClick={() => setImage({ negativePrompt: info.defaultNegative })}>모델 기본값으로</button>
+                  )}
                 </div>
 
                 <label className="check">
                   <input type="checkbox" checked={settings.image.qualityTags} onChange={(e) => setImage({ qualityTags: e.target.checked })} />
                   품질 태그 자동 추가
+                </label>
+                {info.transparency && (
+                  <label className="check">
+                    <input type="checkbox" checked={settings.image.transparent} onChange={(e) => setImage({ transparent: e.target.checked })} />
+                    투명 배경 (V5)
+                  </label>
+                )}
+                <label className="check">
+                  <input type="checkbox" checked={settings.image.thoroughTags} onChange={(e) => setImage({ thoroughTags: e.target.checked })} />
+                  태그 변환 때 GLM이 먼저 생각하기 (느리지만 더 꼼꼼해요)
                 </label>
               </div>
             )}

@@ -445,3 +445,29 @@ textarea.form-control { resize: vertical; }
 .viewer-ko { color: #fff; }
 .viewer-prompt { color: #aaa; font-family: ui-monospace, monospace; font-size: 12.5px !important; }
 .viewer .btn.secondary { background: #222; color: #eee; }
+
+/* ------------------------------------------------------------ image prompt editor */
+
+.mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 14px; line-height: 1.55; }
+code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.92em; background: var(--bg-secondary); padding: 1px 5px; border-radius: 5px; }
+
+.ref-chip {
+  display: flex; align-items: center; gap: 6px; margin-top: 8px;
+  background: var(--primary-bg); color: var(--text); border-radius: 999px; padding: 4px 6px 4px 12px; font-size: 13px; width: fit-content; max-width: 100%;
+}
+.ref-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ref-chip button { background: none; border: none; color: var(--text-muted); display: flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px; }
+
+.char-card { border: 1px solid var(--border); background: var(--surface); border-radius: 12px; padding: 8px; margin-bottom: 8px; }
+.char-card-head { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+.char-name {
+  flex: 1; min-width: 0; border: none; background: transparent; color: var(--text);
+  font-weight: 700; font-size: 15px; padding: 6px 4px; border-radius: 6px;
+}
+.char-name:focus { outline: none; background: var(--bg-secondary); }
+.char-pos { border: 1px solid var(--border); background: var(--bg); color: var(--text); border-radius: 8px; padding: 6px 8px; font-size: 14px; min-height: 36px; }
+.char-del { background: none; border: none; color: var(--text-muted); min-width: 36px; min-height: 36px; display: flex; align-items: center; justify-content: center; border-radius: 8px; }
+.char-del:active { background: var(--bg-secondary); }
+.add-char { display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px dashed var(--border); border-radius: 10px; min-height: 44px; }
+
+.header-side { width: 96px; flex: none; display: flex; align-items: center; }

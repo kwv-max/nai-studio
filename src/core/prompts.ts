@@ -165,20 +165,117 @@ export function chatCompletionPrompt(p: Omit<ChatPromptInput, 'language'>): { in
 
 // ---------------------------------------------------------------- images and glossary
 
-export function tagMessages(description: string, fromStory: boolean): ChatTurn[] {
-  return [
-    {
-      role: 'system',
-      content: `${MARK_TAGS}
-Output one line of comma-separated English Danbooru-style tags and nothing else.
-Order: number of people (1girl, 2boys, no humans...), well-known character names, appearance (hair, eyes, body), clothing, expression, pose and action, setting and background, lighting, framing.
-Use concrete visual tags only. No sentences, no quality tags, no explanations.`,
-    },
-    {
-      role: 'user',
-      content: fromStory ? `Pick the most visual moment of this passage and write tags for it:\n\n${description.trim()}` : description.trim(),
-    },
-  ];
+export interface TagPromptOptions {
+  /** The input is a story passage (pick a moment) rather than a picture description. */
+  fromStory: boolean;
+  family: 'v5' | 'v4' | 'v3';
+  /** Character prompts the target model accepts (0 = everything goes in base). */
+  maxCharacters: number;
+  /** Character/world notes (story system prompt, glossary) for consistent appearance. */
+  reference?: string;
+}
+
+interface TagExample {
+  input: string;
+  base: string;
+  characters: { name: string; prompt: string; position: string }[];
+}
+
+const MODEL_NAMES = { v5: 'NAI Diffusion V5', v4: 'NAI Diffusion V4.5', v3: 'NAI Diffusion V3' } as const;
+
+// Worked examples, sent as prior turns. They teach the JSON shape and the level of detail better than rules alone.
+const TAG_EXAMPLES: TagExample[] = [
+  {
+    input: '비 오는 밤, 등대 창가에 서서 바다를 바라보는 은발 소녀. 흰 원피스를 입었고 쓸쓸해 보인다.',
+    base: '1girl, solo, upper body, from side, indoors, lighthouse, window, rain on glass, night, rain, ocean, dim lighting, moonlight, long hair, silver hair, white dress, sleeveless dress, standing, looking outside, hand on glass, sad, downcast eyes, closed mouth',
+    characters: [],
+  },
+  {
+    input: '해질녘 벚꽃 아래에서 금발 기사 소년이 검은 머리 마법사 소녀를 꼭 껴안고 있다. 소녀는 울고 있다.',
+    base: '1girl, 1boy, cowboy shot, outdoors, cherry blossoms, falling petals, sunset, orange sky, backlighting',
+    characters: [
+      { name: '기사 소년', prompt: 'boy, blonde hair, short hair, knight, silver armor, cape, closed eyes, gentle smile, source#hug', position: 'left' },
+      { name: '마법사 소녀', prompt: 'girl, black hair, long hair, witch, black robe, witch hat, crying, tears, blush, open mouth, target#hug', position: 'right' },
+    ],
+  },
+  {
+    input: '폐허가 된 성당 안으로 햇빛이 쏟아진다.',
+    base: 'no humans, scenery, wide shot, indoors, church, ruins, broken window, stained glass, light rays, sunlight, dust particles, overgrown, ivy, rubble, stone floor',
+    characters: [],
+  },
+];
+
+/**
+ * Description → NovelAI image prompt as JSON {base, characters[]}.
+ * Rules follow NovelAI's official prompting docs (tag order, multi-character prompts, action tags).
+ */
+export function tagMessages(description: string, o: TagPromptOptions): ChatTurn[] {
+  const multi = o.maxCharacters > 0;
+  const v5 = o.family === 'v5';
+
+  const characterRules = multi
+    ? `## characters
+- Exactly one person (or none): keep "characters" empty and put that person's tags in base, right after the scene tags.
+- Two or more people: one entry per person (at most ${o.maxCharacters}). Base keeps only the count tags and the scene; every personal detail goes into that person's entry so traits don't leak between people.
+- Each "prompt" describes only that person and has no number: start with girl / boy / woman / man / old man / little girl …, then
+  hair length + color + style ("long hair, silver hair, ponytail, blunt bangs"), eye color ("blue eyes"), body and age cues ("tall", "mature female", "muscular"),
+  clothing piece by piece ("white shirt, black pleated skirt, thighhighs"), accessories, expression ("smile", "blush", "tears", "frown", "open mouth"),
+  pose and action ("sitting", "looking at viewer", "holding sword", "crossed arms").
+- Interactions between people use action tags in both prompts: the doer gets "source#hug", the receiver "target#hug"; when both do it together, each gets "mutual#holding hands". After the "#" use the plain Danbooru action (hug, kiss, headpat, carrying, holding hands, pointing at another …).
+- "position": where that person is in the frame: auto, left, center, right, top or bottom. Use auto unless the scene implies a layout.
+- "name": a short label in the description's language, only so the user can tell entries apart.`
+    : `## characters
+This model has no per-character prompts: always return "characters": [] and put every person's tags into base, one person after another.`;
+
+  const system = [
+    `${MARK_TAGS}
+Target model: ${MODEL_NAMES[o.family]}. It was trained on Danbooru tags, so write Danbooru tags: lowercase English, spaces instead of underscores, separated by commas.
+
+Reply with JSON only (no code fences, no comments):
+{"base": "...", "characters": [{"name": "...", "prompt": "...", "position": "auto"}]}`,
+    `## base
+The whole picture, in this order:
+1. Count tags first: "1girl", "1boy", "2girls", "1girl, 1boy", "3girls, 1boy" … Add "solo" for exactly one person. Use "no humans" (plus "scenery" for landscapes) when nobody is in it.${
+      v5 ? ' For a picture with no humans, start base with "background dataset, ".' : ''
+    }
+2. Only for well-known existing characters: their character tag and series tag (e.g. "hatsune miku, vocaloid"). Never write names of original characters as tags; describe how they look instead.
+3. Framing and camera: portrait, upper body, cowboy shot, full body, close-up, wide shot, from above, from below, from side, from behind, dutch angle, pov.
+4. Place and objects: indoors / outdoors, the concrete location (bedroom, classroom, cafe, forest, city street, castle, beach …) and notable objects.
+5. Time, weather, light, mood: day, night, sunset, rain, snow, fog, sunlight, moonlight, backlighting, rim lighting, light rays, dim lighting, candlelight, neon lights.
+6. Art style only if the description asks for one (watercolor, sketch, monochrome, chibi …).`,
+    characterRules,
+    `## Rules
+- Use only concrete, visible tags that exist on Danbooru. Turn ideas into what can be seen: "lonely" → "sad, downcast eyes, alone"; "rich lady" → describe the dress and jewelry.
+- Keep every detail the user gave (colors, clothes, objects, actions). Don't invent hair or eye colors that weren't given${o.reference?.trim() ? ' or found in the reference' : ''}.
+- Be specific: about 15–35 tags for a single-person picture, 8–25 per character entry.
+- No quality or aesthetic tags (masterpiece, best quality, very aesthetic, absurdres …) and no negative tags; the app adds those.
+- No duplicates. No sentences${
+      v5 ? ', except that V5 understands English: you may end base with one short sentence for a pose, layout or interaction that tags cannot express' : ''
+    }.
+- If the scene clearly shows nudity or sexual activity, put "nsfw" right after the count tags; otherwise never add it.${
+      v5 ? '\n- Visible written text (a sign, a speech bubble) only if the description asks for it: add "speech bubble" or "sign" and end base with: Text: <the exact words>' : ''
+    }`,
+    o.fromStory
+      ? 'The user message is a passage from a story. Draw its single most visual moment (one instant, one place); ignore what happens before or after.'
+      : '',
+    o.reference?.trim()
+      ? `## Reference
+Notes about the story's characters and world. Use them only for the fixed appearance (hair, eyes, usual outfit, age) of characters who appear in the scene; don't draw anything that isn't in the scene.
+${o.reference.trim()}`
+      : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  const msgs: ChatTurn[] = [{ role: 'system', content: system }];
+  for (const ex of TAG_EXAMPLES) {
+    let base = multi ? ex.base : [ex.base, ...ex.characters.map((c) => c.prompt)].join(', ');
+    if (v5 && base.startsWith('no humans')) base = `background dataset, ${base}`;
+    msgs.push({ role: 'user', content: ex.input });
+    msgs.push({ role: 'assistant', content: JSON.stringify({ base, characters: multi ? ex.characters : [] }) });
+  }
+  msgs.push({ role: 'user', content: description.trim() });
+  return msgs;
 }
 
 export function glossaryMessages(textEn: string, existing: GlossaryEntry[]): ChatTurn[] {

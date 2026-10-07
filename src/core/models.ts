@@ -117,39 +117,46 @@ export function contextBudgetChars(settings: Settings, model: string): number {
 
 // ---------------------------------------------------------------- images
 
+export type ImageFamily = 'v5' | 'v4' | 'v3';
+
 export interface ImageModelInfo {
   id: string;
   label: string;
-  /** V4+ models take the structured v4_prompt fields. */
-  v4: boolean;
+  family: ImageFamily;
+  /** Per-character prompts the model accepts (0 = merge everything into one prompt). */
+  maxCharacters: number;
   qualityTags: string;
   defaultNegative: string;
+  defaults: { scale: number; steps: number };
+  /** V5 supports real alpha transparency. */
+  transparency: boolean;
 }
 
+// Presets copied from NovelAI's own web client ("Heavy" undesired content, "standard" quality tags).
 const V45_NEG =
   'lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page';
+const V45_CURATED_NEG =
+  'blurry, lowres, upscaled, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, halftone, multiple views, logo, too many watermarks, negative space, blank page';
 const V4_NEG =
-  'blurry, lowres, error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, multiple views, logo, too many watermarks';
+  'blurry, lowres, error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, multiple views, logo, too many watermarks, white blank page, blank page';
 const V3_NEG =
   'lowres, {bad}, error, fewer, extra, missing, worst quality, jpeg artifacts, bad quality, watermark, unfinished, displeasing, chromatic aberration, signature, extra digits, artistic error, username, scan, [abstract]';
 
 export const IMAGE_MODELS: ImageModelInfo[] = [
-  { id: 'nai-diffusion-4-5-full', label: 'NAI Diffusion V4.5 Full', v4: true, qualityTags: 'very aesthetic, masterpiece, no text', defaultNegative: V45_NEG },
-  { id: 'nai-diffusion-4-5-curated', label: 'NAI Diffusion V4.5 Curated', v4: true, qualityTags: 'very aesthetic, masterpiece, no text', defaultNegative: V45_NEG },
-  { id: 'nai-diffusion-4-full', label: 'NAI Diffusion V4 Full', v4: true, qualityTags: 'no text, best quality, very aesthetic, absurdres', defaultNegative: V4_NEG },
-  { id: 'nai-diffusion-3', label: 'NAI Diffusion Anime V3', v4: false, qualityTags: 'best quality, amazing quality, very aesthetic, absurdres', defaultNegative: V3_NEG },
+  { id: 'nai-diffusion-5-full', label: 'NAI Diffusion V5 Full', family: 'v5', maxCharacters: 22, qualityTags: 'very aesthetic, masterpiece, no text', defaultNegative: V45_NEG, defaults: { scale: 7, steps: 23 }, transparency: true },
+  { id: 'nai-diffusion-5-curated', label: 'NAI Diffusion V5 Curated', family: 'v5', maxCharacters: 22, qualityTags: 'very aesthetic, masterpiece, no text', defaultNegative: V45_NEG, defaults: { scale: 7, steps: 23 }, transparency: true },
+  { id: 'nai-diffusion-4-5-full', label: 'NAI Diffusion V4.5 Full', family: 'v4', maxCharacters: 6, qualityTags: 'very aesthetic, masterpiece, no text', defaultNegative: V45_NEG, defaults: { scale: 5, steps: 28 }, transparency: false },
+  { id: 'nai-diffusion-4-5-curated', label: 'NAI Diffusion V4.5 Curated', family: 'v4', maxCharacters: 6, qualityTags: 'very aesthetic, masterpiece, no text, -0.8::feet::, rating:general', defaultNegative: V45_CURATED_NEG, defaults: { scale: 5, steps: 28 }, transparency: false },
+  { id: 'nai-diffusion-4-full', label: 'NAI Diffusion V4 Full', family: 'v4', maxCharacters: 6, qualityTags: 'no text, best quality, very aesthetic, absurdres', defaultNegative: V4_NEG, defaults: { scale: 5.5, steps: 23 }, transparency: false },
+  { id: 'nai-diffusion-3', label: 'NAI Diffusion Anime V3', family: 'v3', maxCharacters: 0, qualityTags: 'best quality, amazing quality, very aesthetic, absurdres', defaultNegative: V3_NEG, defaults: { scale: 5, steps: 28 }, transparency: false },
 ];
 
 export function imageModelInfo(id: string): ImageModelInfo {
-  return (
-    IMAGE_MODELS.find((m) => m.id === id) ?? {
-      id,
-      label: id,
-      v4: !/diffusion-[123]\b|diffusion$|furry|safe-diffusion/.test(id),
-      qualityTags: '',
-      defaultNegative: V45_NEG,
-    }
-  );
+  const known = IMAGE_MODELS.find((m) => m.id === id);
+  if (known) return known;
+  const family: ImageFamily = /diffusion-5/.test(id) ? 'v5' : /diffusion-4/.test(id) ? 'v4' : 'v3';
+  const base = IMAGE_MODELS.find((m) => m.family === family)!;
+  return { ...base, id, label: id };
 }
 
 export const IMAGE_SIZES = [
@@ -160,24 +167,53 @@ export const IMAGE_SIZES = [
 
 export const IMAGE_SAMPLERS = ['k_euler_ancestral', 'k_euler', 'k_dpmpp_2s_ancestral', 'k_dpmpp_2m_sde', 'k_dpmpp_2m', 'k_dpmpp_sde'];
 
+/** Where a character stands in the frame. 'auto' lets the model decide. */
+export const CHARACTER_POSITIONS = [
+  { id: 'auto', label: '자동' },
+  { id: 'left', label: '왼쪽' },
+  { id: 'center', label: '가운데' },
+  { id: 'right', label: '오른쪽' },
+  { id: 'top', label: '위' },
+  { id: 'bottom', label: '아래' },
+] as const;
+
+/** Positions on V4.5's 5×5 grid (V5 accepts any value, these work for both). */
+export function positionToCenter(position: string | undefined): { x: number; y: number } {
+  switch (position) {
+    case 'left': return { x: 0.3, y: 0.5 };
+    case 'right': return { x: 0.7, y: 0.5 };
+    case 'top': return { x: 0.5, y: 0.3 };
+    case 'bottom': return { x: 0.5, y: 0.7 };
+    default: return { x: 0.5, y: 0.5 };
+  }
+}
+
 export const DEFAULT_IMAGE_SETTINGS: ImageSettings = {
-  model: 'nai-diffusion-4-5-full',
+  model: 'nai-diffusion-5-full',
   width: 832,
   height: 1216,
-  steps: 28,
-  scale: 5,
+  steps: 23,
+  scale: 7,
   cfgRescale: 0,
   sampler: 'k_euler_ancestral',
   noiseSchedule: 'karras',
   negativePrompt: V45_NEG,
   qualityTags: true,
   seed: -1,
+  transparent: false,
+  thoroughTags: false,
 };
 
-/** Opus subscribers generate for free at ≤1MP, ≤28 steps, one image. */
-export function isFreeForOpus(settings: Settings): boolean {
+/** Opus subscribers generate for free at ≤1MP, ≤28 steps, one image. V5 draws from a slowly refilling allowance instead. */
+export function imageCost(settings: Settings): { free: boolean; label: string } {
   const i = settings.image;
-  return settings.account?.tier === 3 && i.width * i.height <= 1024 * 1024 && i.steps <= 28;
+  const inFreeSize = settings.account?.tier === 3 && i.width * i.height <= 1024 * 1024 && i.steps <= 28;
+  if (!inFreeSize) return { free: false, label: 'Anlas 소모' };
+  return imageModelInfo(i.model).family === 'v5' ? { free: true, label: '한도 내 무료' } : { free: true, label: 'Opus 무료' };
+}
+
+export function isFreeForOpus(settings: Settings): boolean {
+  return imageCost(settings).free;
 }
 
 export const TIER_NAMES = ['Paper (체험)', 'Tablet', 'Scroll', 'Opus'];

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppContext } from './App';
 import { db, newChat, isAbortError, KNOWN_TEXT_MODELS, type Chat, type ChatMessage, type Progress } from '../core';
-import { ActionSheet, GlossaryEditor, autoGrow, phaseLabel, sendOnEnter } from './Shared';
+import { ActionSheet, GlossaryEditor, autoGrow, imageReference, phaseLabel, sendOnEnter } from './Shared';
 import { ChevronLeft, MoreVertical, Send, StopCircle } from 'lucide-react';
 
 export function ChatView() {
@@ -136,7 +136,7 @@ function NewChatForm({ onCreated, onCancel }: { onCreated: (c: Chat) => void; on
 }
 
 function ChatRoom({ chat: initialChat, onBack }: { chat: Chat; onBack: () => void }) {
-  const { studio, settings, isBusy, setBusy, showToast, navigate, setImageDraftText } = useAppContext();
+  const { studio, settings, isBusy, setBusy, showToast, navigate, setImageDraft } = useAppContext();
   const [chat, setChat] = useState<Chat>(initialChat);
   const chatRef = useRef(chat);
   const [showSettings, setShowSettings] = useState(false);
@@ -263,7 +263,7 @@ function ChatRoom({ chat: initialChat, onBack }: { chat: Chat; onBack: () => voi
 
   const drawMsg = (msg: ChatMessage) => {
     setActionMsg(null);
-    setImageDraftText(msg.en || msg.ko);
+    setImageDraft({ text: msg.en || msg.ko, display: msg.ko || msg.en, reference: imageReference(chatRef.current), source: chatRef.current.charName || chatRef.current.title });
     navigate('image');
   };
 

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppContext } from './App';
 import { db, newStory, isAbortError, KNOWN_TEXT_MODELS, type Progress, type Segment, type Story } from '../core';
-import { ActionSheet, GlossaryEditor, autoGrow, phaseLabel, sendOnEnter } from './Shared';
+import { ActionSheet, GlossaryEditor, autoGrow, imageReference, phaseLabel, sendOnEnter } from './Shared';
 import { ChevronLeft, MoreVertical, Send, StopCircle } from 'lucide-react';
 
 export function NovelView() {
@@ -71,7 +71,7 @@ export function NovelView() {
 }
 
 function NovelEditor({ story: initialStory, onBack }: { story: Story; onBack: () => void }) {
-  const { studio, settings, isBusy, setBusy, showToast, navigate, setImageDraftText } = useAppContext();
+  const { studio, settings, isBusy, setBusy, showToast, navigate, setImageDraft } = useAppContext();
   const [story, setStory] = useState<Story>(initialStory);
   const storyRef = useRef(story);
   const [showSettings, setShowSettings] = useState(false);
@@ -182,7 +182,7 @@ function NovelEditor({ story: initialStory, onBack }: { story: Story; onBack: ()
 
   const drawSegment = (seg: Segment) => {
     setActionSegment(null);
-    setImageDraftText(seg.en || seg.ko);
+    setImageDraft({ text: seg.en || seg.ko, display: seg.ko || seg.en, reference: imageReference(storyRef.current), source: storyRef.current.title });
     navigate('image');
   };
 

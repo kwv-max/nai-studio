@@ -1,7 +1,7 @@
 // Public surface of the core. The UI should import only from here.
 export * from './types';
 export { NaiError, isAbortError } from './errors';
-export { Studio, createStudio, type EditInput, type ImageInput } from './studio';
+export { Studio, createStudio, cleanTags, parseImagePrompt, type EditInput, type ImageInput, type TagOptions } from './studio';
 export { NaiClient } from './nai';
 export { db, loadSettings, saveSettings, newStory, newChat } from './store';
 export {
@@ -18,4 +18,7 @@ export {
   genParamsFor,
   contextBudgetChars,
   isFreeForOpus,
+  imageCost,
+  CHARACTER_POSITIONS,
+  positionToCenter,
 } from './models';

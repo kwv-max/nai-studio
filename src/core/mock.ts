@@ -27,7 +27,14 @@ const KO_POOL = [
   '마침내 그녀가 그를 마주 보았고, 잠시 둘 다 그 침묵을 어떻게 해야 할지 몰랐다.',
 ];
 
-const TAGS = '1girl, long silver hair, blue eyes, white dress, standing, looking out window, lighthouse interior, rain, night, harbor lights, dim lighting, from behind';
+const TAGS_SOLO = { base: '1girl, solo, upper body, indoors, lighthouse, window, night, rain, dim lighting, long hair, silver hair, white dress, looking outside, sad', characters: [] };
+const TAGS_DUO = {
+  base: '1girl, 1boy, cowboy shot, indoors, lighthouse, doorway, night, rain, candlelight',
+  characters: [
+    { name: '엘리제', prompt: 'girl, long hair, silver hair, white dress, surprised, looking at another', position: 'left' },
+    { name: '카엘', prompt: 'boy, black hair, wet hair, long coat, holding letter, standing', position: 'right' },
+  ],
+};
 
 export function createMockFetcher(opts: MockOptions = {}): Fetcher {
   const delay = opts.delayMs ?? 25;
@@ -58,7 +65,7 @@ export function createMockFetcher(opts: MockOptions = {}): Fetcher {
       let text: string;
       if (system.startsWith(MARK_EN2KO)) text = fakeTranslate(last, KO_POOL);
       else if (system.startsWith(MARK_KO2EN)) text = fakeTranslate(last, EN_POOL);
-      else if (system.startsWith(MARK_TAGS)) text = TAGS;
+      else if (system.startsWith(MARK_TAGS)) text = JSON.stringify(/Kael|카엘|두 사람|둘/.test(last) ? TAGS_DUO : TAGS_SOLO);
       else if (system.startsWith(MARK_GLOSSARY))
         text = JSON.stringify([
           { en: 'Elise', ko: '엘리제', note: '반말, 차분함' },

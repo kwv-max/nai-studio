@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { createMockFetcher } from './mock';
 import { DEFAULT_SETTINGS } from './models';
 import { holdBackPartialStop, NaiClient, type Fetcher } from './nai';
-import { chatCompletionPrompt, MARK_EN2KO, MARK_KO2EN, novelCompletionPrompt } from './prompts';
+import { chatCompletionPrompt, MARK_EN2KO, MARK_KO2EN, novelCompletionPrompt, tagMessages } from './prompts';
 import { readSse } from './sse';
-import { joinSeparator, Studio } from './studio';
+import { cleanTags, joinSeparator, parseImagePrompt, Studio } from './studio';
 import { translate } from './translate';
 import type { Settings } from './types';
 import { chunkByParagraph, mirrorEdgeWhitespace, stripThinking, tailChars } from './util';
@@ -340,5 +340,125 @@ describe('zip', () => {
     const entries = await unzip(storedZip('a.png', Uint8Array.from([1, 2, 3])));
     expect(entries[0].name).toBe('a.png');
     expect([...entries[0].data]).toEqual([1, 2, 3]);
+  });
+});
+
+describe('image prompts', () => {
+  it('parses structured replies, normalizes tags and positions', () => {
+    const raw = '```json\n{"base": "1girl, 1boy, masterpiece, outdoors, cherry_blossoms, Outdoors", "characters": [' +
+      '{"name": "소녀", "prompt": "girl, Silver_Hair, best quality, target#hug", "position": "left"},' +
+      '{"name": "소년", "prompt": "boy, black hair, source#hug", "position": "somewhere"}]}\n```';
+    expect(parseImagePrompt(raw, 6)).toEqual({
+      base: '1girl, 1boy, outdoors, cherry blossoms',
+      characters: [
+        { name: '소녀', prompt: 'girl, silver hair, target#hug', position: 'left' },
+        { name: '소년', prompt: 'boy, black hair, source#hug', position: 'auto' },
+      ],
+    });
+  });
+
+  it('folds characters into base for models without character prompts', () => {
+    const raw = JSON.stringify({ base: '2girls, park', characters: [{ name: 'a', prompt: 'girl, red hair', position: 'auto' }, { name: 'b', prompt: 'girl, blue hair', position: 'auto' }] });
+    expect(parseImagePrompt(raw, 0)).toEqual({ base: '2girls, park, girl, red hair, blue hair', characters: [] });
+  });
+
+  it('falls back to a plain tag line when the reply is not JSON', () => {
+    expect(parseImagePrompt('Tags: 1girl, solo, rain.', 6)).toEqual({ base: '1girl, solo, rain', characters: [] });
+  });
+
+  it('keeps weights, emoticons, sentences and Text: blocks intact', () => {
+    expect(cleanTags('1girl, 1.3::red scarf::, @_@, She waves at the crowd from the stage., Text: Hello, World')).toBe(
+      '1girl, 1.3::red scarf::, @_@, She waves at the crowd from the stage., Text: Hello, World',
+    );
+  });
+
+  it('builds the tag prompt for the target model', () => {
+    const v3 = tagMessages('두 소녀가 공원에 있다', { fromStory: false, family: 'v3', maxCharacters: 0 });
+    expect(v3[0].content).toContain('no per-character prompts');
+    expect(v3.slice(1).every((m) => m.role !== 'assistant' || JSON.parse(m.content).characters.length === 0)).toBe(true);
+
+    const v5 = tagMessages('장면', { fromStory: true, family: 'v5', maxCharacters: 22, reference: 'Elise: silver hair, blue eyes' });
+    expect(v5[0].content).toContain('source#hug');
+    expect(v5[0].content).toContain('Elise: silver hair, blue eyes');
+    expect(v5[0].content).toContain('most visual moment');
+    expect(v5.some((m) => m.role === 'assistant' && m.content.includes('background dataset, no humans'))).toBe(true);
+    expect(v5.at(-1)).toEqual({ role: 'user', content: '장면' });
+  });
+});
+
+describe('image requests', () => {
+  const png = btoa(String.fromCharCode(0x89, 0x50, 0x4e, 0x47, 1));
+  const ok = () => Response.json({ images: [{ image: png, seed: 1 }] }, { status: 201 });
+  const chars = [
+    { name: 'a', prompt: 'girl, red hair', position: 'left' },
+    { name: 'b', prompt: 'boy, black hair', position: 'auto' },
+  ];
+
+  it('sends character prompts with positions on V4.5', async () => {
+    const { calls, fetcher } = recorder(ok);
+    await new NaiClient('k', fetcher).image({
+      prompt: '1girl, 1boy, park',
+      characters: chars,
+      negativePrompt: 'lowres',
+      settings: { ...DEFAULT_SETTINGS.image, model: 'nai-diffusion-4-5-full', qualityTags: false },
+    });
+    const p = calls[0].body.parameters;
+    expect(calls[0].body.input).toBe('1girl, 1boy, park');
+    expect(p.v4_prompt.use_coords).toBe(true);
+    expect(p.v4_prompt.caption.char_captions).toEqual([
+      { char_caption: 'girl, red hair', centers: [{ x: 0.3, y: 0.5 }] },
+      { char_caption: 'boy, black hair', centers: [{ x: 0.5, y: 0.5 }] },
+    ]);
+    expect(p.v4_negative_prompt.caption.char_captions).toHaveLength(2);
+    expect(p.noise_schedule).toBe('karras');
+  });
+
+  it('lets the model place characters when none are positioned', async () => {
+    const { calls, fetcher } = recorder(ok);
+    await new NaiClient('k', fetcher).image({
+      prompt: 'x',
+      characters: chars.map((c) => ({ ...c, position: 'auto' })),
+      negativePrompt: '',
+      settings: DEFAULT_SETTINGS.image,
+    });
+    expect(calls[0].body.parameters.v4_prompt.use_coords).toBe(false);
+  });
+
+  it('merges characters into the prompt on V3', async () => {
+    const { calls, fetcher } = recorder(ok);
+    await new NaiClient('k', fetcher).image({
+      prompt: '1girl, 1boy',
+      characters: chars,
+      negativePrompt: '',
+      settings: { ...DEFAULT_SETTINGS.image, model: 'nai-diffusion-3', qualityTags: false },
+    });
+    expect(calls[0].body.input).toBe('1girl, 1boy, girl, red hair, boy, black hair');
+    expect(calls[0].body.parameters.v4_prompt).toBeUndefined();
+  });
+
+  it('V5: forces karras and supports transparent backgrounds', async () => {
+    const { calls, fetcher } = recorder(ok);
+    await new NaiClient('k', fetcher).image({
+      prompt: '1girl, solo',
+      negativePrompt: '',
+      settings: { ...DEFAULT_SETTINGS.image, model: 'nai-diffusion-5-full', noiseSchedule: 'exponential', transparent: true },
+    });
+    const p = calls[0].body.parameters;
+    expect(calls[0].body.model).toBe('nai-diffusion-5-full');
+    expect(calls[0].body.input).toBe('1girl, solo, transparent background, very aesthetic, masterpiece, no text');
+    expect(p.noise_schedule).toBe('karras');
+    expect(p.tag_hint_transparent_background).toBe(true);
+  });
+
+  it('Studio.textToTags returns base + characters shaped for the selected model', async () => {
+    const studio = new Studio(settings(), createMockFetcher({ delayMs: 0 }));
+    const duo = await studio.textToTags('카엘이 엘리제에게 편지를 건넨다', { fromStory: true });
+    expect(duo.base).toMatch(/^1girl, 1boy/);
+    expect(duo.characters.map((c) => c.position)).toEqual(['left', 'right']);
+
+    const v3 = new Studio(settings({ image: { ...DEFAULT_SETTINGS.image, model: 'nai-diffusion-3' } }), createMockFetcher({ delayMs: 0 }));
+    const merged = await v3.textToTags('카엘이 엘리제에게 편지를 건넨다');
+    expect(merged.characters).toEqual([]);
+    expect(merged.base).toContain('holding letter');
   });
 });

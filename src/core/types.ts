@@ -60,6 +60,27 @@ export interface ImageSettings {
   qualityTags: boolean;
   /** -1 = random each time. */
   seed: number;
+  /** V5 only: real alpha-transparent background. */
+  transparent: boolean;
+  /** Lets GLM reason before writing tags. Slower, usually more accurate. */
+  thoroughTags: boolean;
+}
+
+/** One character's own prompt (V4+ multi-character prompting). */
+export interface CharacterPrompt {
+  /** Short label for the user, e.g. "엘리제". Not sent to the model. */
+  name: string;
+  /** Tags for this character only, without a count ("girl, silver hair, …"). */
+  prompt: string;
+  /** auto | left | center | right | top | bottom */
+  position: string;
+}
+
+/** A full image prompt: scene-level tags plus per-character prompts. */
+export interface ImagePrompt {
+  /** Count tags, framing, setting, lighting; or everything for a single character. */
+  base: string;
+  characters: CharacterPrompt[];
 }
 
 export interface Settings {
@@ -145,7 +166,10 @@ export interface GalleryImage {
   height: number;
   seed: number;
   model: string;
+  /** Base prompt as typed (quality tags are added at request time). */
   prompt: string;
+  /** Per-character prompts, if any. */
+  characters?: CharacterPrompt[];
   negativePrompt: string;
   /** The Korean description the prompt was made from, if any. */
   sourceKo?: string;
